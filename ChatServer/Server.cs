@@ -1,7 +1,6 @@
 ﻿using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 namespace ChatServer
@@ -9,8 +8,9 @@ namespace ChatServer
     public class Server
     {
         public const int poort = 1111;
-        public Dictionary<IPEndPoint, string> clients = new Dictionary<IPEndPoint, string>();
-        public Dictionary<IPEndPoint, string> pubkeys = new Dictionary<IPEndPoint, string>();
+        public Dictionary<IPEndPoint, string> clients = new Dictionary<IPEndPoint, string>(); // clients ip naar naam
+        public Dictionary<IPEndPoint, string> pubkeys = new Dictionary<IPEndPoint, string>(); // public key per client
+        public Dictionary<IPEndPoint, byte[]> clientAesKeys = new Dictionary<IPEndPoint, byte[]>(); // aes-keys per client
         public string sendablePubServerString;
         RSA rSA;
         Aes _aes;
@@ -41,7 +41,6 @@ namespace ChatServer
         }
         #endregion
 
-        // Nu string ipv byte[]
         public void RegisterClient(IPEndPoint ep, string message, UdpClient udp)
         {
             string[] parts = message.Split("|");
@@ -49,15 +48,11 @@ namespace ChatServer
             string pubKey = parts[1];
             if (message.StartsWith("REGISTER:"))
             {
-                byte[] temp = Encoding.UTF8.GetBytes($"{naam} is de chat gejoined");
                 if (!clients.ContainsKey(ep))
                 {
                     clients.Add(ep, naam);
                     pubkeys.Add(ep, pubKey);
-                    foreach (var client in clients)
-                    {
-                        udp.Send(temp, temp.Length, client.Key);
-                    }
+                    BroadCastMessageToIP(ep, $"{naam} is de chat gejoined", udp);
                 }
                 else
                 {
@@ -65,6 +60,7 @@ namespace ChatServer
                 }
             }
         }
+
 
         public void DeleteClient(IPEndPoint ep, string message, UdpClient udp)
         {
@@ -83,19 +79,35 @@ namespace ChatServer
 
                 clients.Remove(ep);
                 pubkeys.Remove(ep);
+                clientAesKeys.Remove(ep); // verwijder AES-sleutel bij disconnect
             }
         }
 
+        
         public void BroadCastMessageToIP(IPEndPoint ep, string message, UdpClient udp)
         {
             string naam = clients[ep];
-            byte[] temp = Encoding.UTF8.GetBytes($"{naam}: {message}");
-            hmac = makeHmac(_aes.Key, temp);
-            byte[] sendableTemp = hmac.Concat(temp).ToArray();
+            string fullMessage = $"{naam}: {message}";
+            byte[] plainBytes = Encoding.UTF8.GetBytes(fullMessage);
+
             foreach (var client in clients)
             {
-                if (!client.Key.Equals(ep))
+                if (client.Key.Equals(ep)) continue;
+                if (!clientAesKeys.ContainsKey(client.Key)) continue;
+
+                byte[] clientKey = clientAesKeys[client.Key];
+
+                using (Aes aes = Aes.Create())
                 {
+                    aes.Key = clientKey;
+                    aes.GenerateIV();
+
+                    byte[] encryptedMessage = aes.EncryptCbc(plainBytes, aes.IV, PaddingMode.PKCS7);
+                    byte[] ivAndEncrypted = aes.IV.Concat(encryptedMessage).ToArray();
+
+                    byte[] hmac = makeHmac(clientKey, ivAndEncrypted);
+                    byte[] sendableTemp = hmac.Concat(ivAndEncrypted).ToArray();
+
                     udp.Send(sendableTemp, sendableTemp.Length, client.Key);
                 }
             }
@@ -125,9 +137,9 @@ namespace ChatServer
                     byte[] encryptedAesKey = encryptedBytesFull.Take(256).ToArray();
                     byte[] encryptedAesMessageAndHmac = encryptedBytesFull.Skip(256).ToArray();
 
-                    // HMAC = laatste 32 bytes van encryptedAesMessageAndHmac
+                    // Hmac 
                     byte[] receivedHmac = encryptedAesMessageAndHmac.Skip(encryptedAesMessageAndHmac.Length - 32).ToArray();
-                    // AES-message = alles behalve die laatste 32 bytes
+                    // AES-message 
                     byte[] encryptedAesMessage = encryptedAesMessageAndHmac.Take(encryptedAesMessageAndHmac.Length - 32).ToArray();
 
                     byte[] decryptedAesKeyAndIv = rSA.Decrypt(encryptedAesKey, RSAEncryptionPadding.Pkcs1);
@@ -135,7 +147,7 @@ namespace ChatServer
                     byte[] aesIv = decryptedAesKeyAndIv.Skip(32).Take(16).ToArray(); // de IV
                     byte[] decryptedAesMessage;
 
-                    // hmac check
+                    // Hmac check
                     using (var hmacCheck = new HMACSHA256(aesKey))
                     {
                         byte[] calculatedHmac = hmacCheck.ComputeHash(encryptedAesKey.Concat(encryptedAesMessage).ToArray());
@@ -159,8 +171,13 @@ namespace ChatServer
                                 aesTemp.Padding = PaddingMode.PKCS7;
                                 decryptedAesMessage = aesTemp.DecryptCbc(encryptedAesMessage, aesIv, PaddingMode.PKCS7);
                             }
-
                         }
+                    }
+
+                    // sla AES-sleutel op per client
+                    if (!clientAesKeys.ContainsKey(iPEndPoint))
+                    {
+                        clientAesKeys[iPEndPoint] = aesKey;
                     }
 
                     string message = Encoding.UTF8.GetString(decryptedAesMessage);
@@ -179,7 +196,6 @@ namespace ChatServer
                     {
                         BroadCastMessageToIP(iPEndPoint, message, udpClient);
                     }
-
                 }
             }
             catch (SocketException e)
@@ -191,7 +207,6 @@ namespace ChatServer
                 Console.WriteLine("Server wordt afgesloten");
                 udpClient.Close();
             }
-
         }
     }
 }

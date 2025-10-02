@@ -21,14 +21,13 @@ class Client
         #endregion
 
         #region Client
-        Console.Write("Registreer je naam met <REGISTER:naam>");
+        Console.Write("Registreer je naam met <REGISTER:naam>"); 
         string naam = Console.ReadLine();
         int i = Random.Shared.Next(1112, 12000);
 
         UdpClient udp = new UdpClient(i);
         IPEndPoint serverEP = new IPEndPoint(IPAddress.Loopback, 1111);
 
-        byte[] hmac;
         byte[] makeHmac(byte[] key, byte[] data)
         {
             using (var hmac = new HMACSHA256(key))
@@ -36,7 +35,7 @@ class Client
                 return hmac.ComputeHash(data);
             }
         }
-
+       
         // Stap 0: server public key opvragen
         byte[] keyBytes = Encoding.UTF8.GetBytes("KEY");
         udp.Send(keyBytes, keyBytes.Length, serverEP);
@@ -48,12 +47,12 @@ class Client
         rsaServer.ImportSubjectPublicKeyInfo(serverKeyBytes, out _);
 
         // Stap 1: registreer
-        byte[] keyAndIv = aes.Key.Concat(aes.IV).ToArray(); // initieel
+        byte[] keyAndIv = aes.Key.Concat(aes.IV).ToArray(); 
         byte[] registerBytes = Encoding.UTF8.GetBytes($"{naam}|{sendablePub}");
         byte[] encryptedBytes = aes.EncryptCbc(registerBytes, aes.IV, PaddingMode.PKCS7);
         byte[] rsaEncryptedAesKey = rsaServer.Encrypt(keyAndIv, RSAEncryptionPadding.Pkcs1);
         byte[] registerMessage = rsaEncryptedAesKey.Concat(encryptedBytes).ToArray();
-        hmac = makeHmac(aes.Key, registerMessage);
+        byte[] hmac = makeHmac(aes.Key, registerMessage);
         byte[] fullRegisterMessage = registerMessage.Concat(hmac).ToArray();
         udp.Send(fullRegisterMessage, fullRegisterMessage.Length, serverEP);
 
@@ -64,22 +63,33 @@ class Client
             while (true)
             {
                 byte[] data = udp.Receive(ref remoteEP2);
-                if (data.Length < 32) continue;
+                if (data.Length < 48) continue; // minimaal HMAC + IV + iets
 
                 byte[] receivedHmac = data.Take(32).ToArray();
-                byte[] receivedMessage = data.Skip(32).ToArray();
+                byte[] ivAndEncrypted = data.Skip(32).ToArray();
 
-                using (var hmacCheck = new HMACSHA256(aesKey))
+                byte[] calculatedHmac = makeHmac(aesKey, ivAndEncrypted);
+                if (!calculatedHmac.SequenceEqual(receivedHmac))
                 {
-                    byte[] calculatedHmac = hmacCheck.ComputeHash(receivedMessage);
-                    if (!calculatedHmac.SequenceEqual(receivedHmac))
-                    {
-                        Console.WriteLine("Het ontvangen bericht was aangepast!");
-                        continue;
-                    }
+                    Console.WriteLine("Het ontvangen bericht was aangepast!");
+                    continue;
                 }
 
-                string realMessage = Encoding.UTF8.GetString(receivedMessage); // hele plaintext
+                byte[] iv = ivAndEncrypted.Take(16).ToArray();
+                byte[] encryptedMessage = ivAndEncrypted.Skip(16).ToArray();
+
+                string realMessage;
+                using (Aes aesDecrypt = Aes.Create())
+                {
+                    aesDecrypt.Key = aesKey;
+                    aesDecrypt.IV = iv;
+                    aesDecrypt.Mode = CipherMode.CBC;
+                    aesDecrypt.Padding = PaddingMode.PKCS7;
+
+                    byte[] decrypted = aesDecrypt.DecryptCbc(encryptedMessage, iv, PaddingMode.PKCS7);
+                    realMessage = Encoding.UTF8.GetString(decrypted);
+                }
+
                 Console.WriteLine(realMessage);
             }
         });
@@ -91,7 +101,6 @@ class Client
         {
             string text = Console.ReadLine();
 
-            // Voor elk bericht een nieuwe IV (AES-sleutel blijft hetzelfde)
             aes.GenerateIV();
             keyAndIv = aes.Key.Concat(aes.IV).ToArray();
 
