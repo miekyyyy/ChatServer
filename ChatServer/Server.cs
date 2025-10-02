@@ -67,13 +67,14 @@ namespace ChatServer
             if (message.StartsWith("LEAVE") && clients.ContainsKey(ep))
             {
                 string naam = clients[ep];
-                byte[] temp = Encoding.UTF8.GetBytes($"{naam} is de chat geleaved");
+                string temp =  $"{naam} is de chat geleaved";
 
                 foreach (var client in clients)
                 {
                     if (!client.Key.Equals(ep))
                     {
-                        udp.Send(temp, temp.Length, client.Key);
+                        BroadCastMessageToIP(ep, temp, udp);
+                       
                     }
                 }
 
